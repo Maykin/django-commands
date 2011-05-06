@@ -1,5 +1,6 @@
 # Inspired by http://djangosnippets.org/snippets/823/
 import time, os
+import tempfile
 from optparse import make_option
 
 from django.core.management.base import CommandError, LabelCommand
@@ -22,42 +23,55 @@ class Command(LabelCommand):
         db_conf = get_db_conf(options)
 
         backup_handler = getattr(self, '_backup_%s_db' % db_conf['engine'])
-        ret, outfile = backup_handler(db_conf, "%s-%s" %
-                (label, time.strftime('%Y-%m-%d-%H%M')))
 
-        if not ret:
-            print ("Database '%s' successfully backed up to: %s" %
-                    (db_conf['db_name'], outfile))
-        else:
+        try:
+            tmp_outfile = tempfile.NamedTemporaryFile(mode='w')
+
+            ret, outfile = backup_handler(db_conf, "%s-%s" %
+                    (label, time.strftime('%Y-%m-%d-%H%M')),
+                    tmp_outfile)
+            if ret:
+                raise IOError()
+
+            _check_writable(outfile)
+
+            ret = os.system('gzip -c %s -9 > %s' % (tmp_outfile.name, outfile))
+            if ret:
+                raise IOError()
+        except IOError:
+            # Cleanup empty output file if something went wrong
+            os.system('rm %s' % outfile)
             raise CommandError("Database '%s' backup to '%s' failed" %
                     (db_conf['db_name'], outfile))
+        finally:
+            tmp_outfile.close()
 
-    def _backup_sqlite3_db(self, db_conf, outfile):
-        outfile = '%s.sqlite.gz' % outfile
-        _check_writable(outfile)
-        ret = os.system('sqlite3 %s .dump | gzip -9 > %s' %
+        print ("Database '%s' successfully backed up to: %s" %
                 (db_conf['db_name'], outfile))
+
+    def _backup_sqlite3_db(self, db_conf, outfile, tmp_outfile):
+        outfile = '%s.sqlite.gz' % outfile
+        ret = os.system('sqlite3 %s .dump > %s' %
+                (db_conf['db_name'], tmp_outfile.name))
 
         return ret, outfile
 
     def _backup_postgresql_db(self, db_conf, outfile):
         return self._backup_postgresql_psycopg2_db(db_conf, outfile)
 
-    def _backup_postgresql_psycopg2_db(self, db_conf, outfile):
+    def _backup_postgresql_psycopg2_db(self, db_conf, outfile, tmp_outfile):
         passwd = ('export PGPASSWORD=%s;' % db_conf['password']
                     if db_conf['password'] else '')
         outfile = '%s.pgsql.gz' % outfile
-        _check_writable(outfile)
-        ret = os.system('%s pg_dump %s | gzip -9 > %s' %
-                (passwd, build_postgres_args(db_conf), outfile))
+        ret = os.system('%s pg_dump %s > %s' %
+                (passwd, build_postgres_args(db_conf), tmp_outfile.name))
 
         return ret, outfile
 
-    def _backup_mysql_db(self, db_conf, outfile):
+    def _backup_mysql_db(self, db_conf, outfile, tmp_outfile):
         outfile = '%s.mysql.gz' % outfile
-        _check_writable(outfile)
-        ret = os.system('mysqldump %s | gzip -9 > %s' %
-                (build_mysql_args(db_conf), outfile))
+        ret = os.system('mysqldump %s > %s' %
+                (build_mysql_args(db_conf), tmp_outfile.name))
 
         return ret, outfile
 
